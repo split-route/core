@@ -1,0 +1,60 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  TAGS: with_gvisor,with_quic,with_utls,with_wireguard,with_openvpn
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go vet -tags $TAGS ./...
+      - run: go test ./...
+      - run: go test -tags $TAGS ./...
+
+  cross:
+    # Compilation only: it proves the engine builds for every platform the apps need.
+    strategy:
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: windows, goarch: amd64}
+          - {goos: android, goarch: arm64}
+          - {goos: darwin, goarch: arm64}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -tags $TAGS ./...
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CC="$(xcrun --sdk iphoneos --find clang)" CGO_ENABLED=1 GOOS=ios GOARCH=arm64 \
+          CGO_CFLAGS="-isysroot $SDK -arch arm64 -miphoneos-version-min=15.0" \
+          CGO_LDFLAGS="-isysroot $SDK -arch arm64 -miphoneos-version-min=15.0" \
+          go build -tags $TAGS ./...
