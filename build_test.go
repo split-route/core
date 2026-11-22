@@ -80,13 +80,13 @@ func TestBuildRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := parse(t, b)
-	want := []string{"sniff", "hijack-dns", "private", "reject:ads", "route>direct:ir-cidr", "route>t-home:social", "route>t-office:work"}
+	want := []string{"sniff", "hijack-dns", "private", "reject:ads", "route>direct:ir-cidr", "route>t-home:social", "route>selected:work"}
 	if got := ruleOrder(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("rule order:\n got %v\nwant %v", got, want)
 	}
 	route := cfg["route"].(map[string]any)
-	if route["final"] != "t-office" || route["auto_detect_interface"] != true {
-		t.Errorf("route = %v: unmatched traffic goes to the first tunnel, and the tun needs the default interface", route)
+	if route["final"] != "selected" || route["auto_detect_interface"] != true {
+		t.Errorf("route = %v: unmatched traffic goes to the selector, and the tun needs the default interface", route)
 	}
 	// Both tunnels are endpoints of the one instance, each with its own DNS server through it.
 	var tags []string
@@ -101,7 +101,7 @@ func TestBuildRouting(t *testing.T) {
 		t.Errorf("endpoints = %v", tags)
 	}
 	dns := cfg["dns"].(map[string]any)
-	if dns["final"] != "dns-t-office" {
+	if dns["final"] != "dns-selected" {
 		t.Errorf("dns final = %v", dns["final"])
 	}
 	// Direct names resolve locally; a list with its own tunnel through it; the default tunnel's list needs no rule.
@@ -113,10 +113,36 @@ func TestBuildRouting(t *testing.T) {
 	if !reflect.DeepEqual(rs, []string{"ir-cidr-dns>local", "social-dns>dns-t-home"}) {
 		t.Errorf("dns rules = %v", rs)
 	}
+	// One resolver through the selector, and one for each tunnel a list names (here only home).
+	servers := map[string]string{}
 	for _, d := range dns["servers"].([]any) {
-		if m := d.(map[string]any); m["type"] == "udp" && m["detour"] != strings.TrimPrefix(m["tag"].(string), "dns-") {
-			t.Errorf("DNS server %v goes through %v", m["tag"], m["detour"])
+		if m := d.(map[string]any); m["type"] == "udp" {
+			servers[m["tag"].(string)] = m["detour"].(string)
 		}
+	}
+	if !reflect.DeepEqual(servers, map[string]string{"dns-selected": "selected", "dns-t-home": "t-home"}) {
+		t.Errorf("DNS servers (tag > detour) = %v", servers)
+	}
+	// The selector holds every tunnel, and drops connections of the tunnel it leaves.
+	var sel map[string]any
+	for _, o := range cfg["outbounds"].([]any) {
+		if m := o.(map[string]any); m["tag"] == "selected" {
+			sel = m
+		}
+	}
+	if sel == nil || sel["type"] != "selector" || sel["interrupt_exist_connections"] != true ||
+		!reflect.DeepEqual(sel["outbounds"], []any{"t-office", "t-home"}) {
+		t.Errorf("selector = %v", sel)
+	}
+	if _, ok := sel["default"]; ok {
+		t.Error("the selector has a default: the choice must not be part of the built config")
+	}
+	// sing-box makes a cache file whether we ask or not (the engine passes a log writer);
+	// its path must be in the work directory, never the relative default "cache.db",
+	// which is "/" under launchd and read-only.
+	cache := cfg["experimental"].(map[string]any)["cache_file"].(map[string]any)
+	if cache["enabled"] != true || cache["path"] != "/data/split-route/cache.db" {
+		t.Errorf("cache_file = %v", cache)
 	}
 	// Every rule-set points into the work dir's rulesets directory.
 	for _, r := range route["rule_set"].([]any) {
@@ -168,7 +194,6 @@ func TestBuildConfigDependsOnStructureOnly(t *testing.T) {
 		"action":      func(c *Config) { c.Lists[0].Action = rules.Block },
 		"a new list":  func(c *Config) { c.Lists = append(c.Lists, List{ID: "c", Name: "C", Action: rules.Block}) },
 		"list target": func(c *Config) { c.Lists[1] = List{ID: "b", Name: "B", Action: rules.Tunnel, Tunnel: "home"} },
-		"default":     func(c *Config) { c.Default = "home" },
 		"a tunnel":    func(c *Config) { c.Tunnels = c.Tunnels[:1] },
 		"dns":         func(c *Config) { c.DNS.Remote = "9.9.9.9" },
 	} {
@@ -178,6 +203,25 @@ func TestBuildConfigDependsOnStructureOnly(t *testing.T) {
 		if build(a) == build(c) {
 			t.Errorf("%s did not change the config", name)
 		}
+	}
+}
+
+// The default tunnel is chosen at run time, so it must not be in the built
+// config: changing it is a switch of the selector, never a restart.
+func TestBuildDoesNotDependOnTheDefaultTunnel(t *testing.T) {
+	a := baseConfig(t)
+	b := a
+	b.Default = "home"
+	x, err := Build(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := Build(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(x) != string(y) {
+		t.Error("the default tunnel changed the built config")
 	}
 }
 
@@ -266,5 +310,62 @@ func TestTunnelOptionsAreChecked(t *testing.T) {
 	c.Tunnels[0].Options = opts("")
 	if err := c.Validate(); err != nil {
 		t.Errorf("ordinary options refused: %v", err)
+	}
+}
+
+// A proxy tunnel's server is found by name through DNS over HTTPS to a public
+// address, not the system resolver: a network that answers for a filtered name with a
+// private block-page address (10.10.34.34) makes every dial time out. OpenVPN keeps
+// the system resolver.
+func TestBuildResolvesProxyServersOverDoH(t *testing.T) {
+	c := baseConfig(t)
+	c.Tunnels = append(c.Tunnels, Tunnel{ID: "node", Name: "Node", Protocol: "vless",
+		Options: json.RawMessage(`{"type":"vless","server":"node.example.com","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811"}`)})
+	resolvers := func(c Config) (map[string]any, map[string]any) {
+		b, err := Build(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := parse(t, b)
+		got := map[string]any{}
+		for _, o := range cfg["outbounds"].([]any) {
+			if m := o.(map[string]any); m["tag"] == "t-node" {
+				got["t-node"] = m["domain_resolver"]
+			}
+		}
+		for _, e := range cfg["endpoints"].([]any) {
+			if m := e.(map[string]any); m["tag"] == "t-office" {
+				got["t-office"] = m["domain_resolver"]
+			}
+		}
+		servers := map[string]any{}
+		for _, s := range cfg["dns"].(map[string]any)["servers"].([]any) {
+			m := s.(map[string]any)
+			servers[m["tag"].(string)] = m
+		}
+		return got, servers
+	}
+
+	got, servers := resolvers(c)
+	if got["t-node"] != "dns-bootstrap" || got["t-office"] != "local" {
+		t.Errorf("domain_resolver: proxy %v, openvpn %v", got["t-node"], got["t-office"])
+	}
+	boot, _ := servers["dns-bootstrap"].(map[string]any)
+	if boot["type"] != "https" || boot["server"] != "1.1.1.1" || boot["path"] != "/dns-query" || boot["detour"] != nil {
+		t.Errorf("bootstrap server = %v: DoH to a public address, direct", boot)
+	}
+
+	c.DNS.Bootstrap = "9.9.9.9"
+	if _, servers := resolvers(c); servers["dns-bootstrap"].(map[string]any)["server"] != "9.9.9.9" {
+		t.Errorf("custom bootstrap = %v", servers["dns-bootstrap"])
+	}
+	c.DNS.Bootstrap = BootstrapSystem
+	got, servers = resolvers(c)
+	if got["t-node"] != "local" || servers["dns-bootstrap"] != nil {
+		t.Errorf("system bootstrap: proxy resolves with %v, bootstrap server %v", got["t-node"], servers["dns-bootstrap"])
+	}
+	c.DNS.Bootstrap = "dns.example.com"
+	if _, err := Build(c); err == nil {
+		t.Error("a bootstrap that is not an IP address or \"system\" was accepted")
 	}
 }

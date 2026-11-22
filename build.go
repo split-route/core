@@ -15,8 +15,26 @@ import (
 //
 // A tunnel list whose tunnel isn't connected is not sent anywhere else: the
 // tunnel's endpoint refuses the connection.
+//
+// Everything that names no tunnel (the final route, and lists with no tunnel of
+// their own) goes to one selector, selectorTag, whose members are all the tunnels.
+// Which member it uses is chosen at run time (Engine.Select), not here: Build's
+// output does not depend on Config.Default, so changing the default tunnel is a
+// switch of the selector, never a restart.
 
 func tunnelTag(id string) string { return "t-" + id }
+
+// cachePath is sing-box's cache file, inside the work directory.
+func cachePath(workDir string) string { return filepath.Join(workDir, "cache.db") }
+
+// selectorTag is the selector outbound that carries all traffic with no tunnel of its own.
+const selectorTag = "selected"
+
+// bootstrapTag is the DNS server that finds proxy tunnels' servers by name.
+const bootstrapTag = "dns-bootstrap"
+
+// dnsSelectorTag is the DNS server that resolves through the selector.
+const dnsSelectorTag = "dns-selected"
 
 // Build returns the sing-box config for c. It is pure and deterministic, and it
 // does not depend on any list's entries (they live in rule-set files), so
@@ -30,15 +48,31 @@ func Build(c Config) ([]byte, error) {
 	if remote == "" {
 		remote = "1.1.1.1"
 	}
-	def := c.Default
-	if def == "" {
-		def = c.Tunnels[0].ID
+	bootstrap := c.DNS.Bootstrap
+	if bootstrap == "" {
+		bootstrap = "1.1.1.1"
 	}
 	dir := ruleset.Dir(c.WorkDir)
 
+	// Tunnels that a list names get a resolver of their own; everything else
+	// resolves through the selector.
+	named := map[string]bool{}
+	for _, l := range c.Lists {
+		if l.Action == rules.Tunnel && l.Tunnel != "" {
+			named[l.Tunnel] = true
+		}
+	}
+
 	var endpoints []map[string]any
 	outbounds := []map[string]any{{"type": "direct", "tag": "direct"}}
-	dnsServers := []map[string]any{{"type": "local", "tag": "local"}}
+	dnsServers := []map[string]any{{"type": "local", "tag": "local"},
+		{"type": "udp", "tag": dnsSelectorTag, "server": remote, "detour": selectorTag}}
+	if bootstrap != BootstrapSystem {
+		// The server's own name is looked up here: over HTTPS to a public address, direct
+		// (not through a tunnel, which isn't up yet), so a filtered name isn't poisoned.
+		dnsServers = append(dnsServers, map[string]any{"type": "https", "tag": bootstrapTag, "server": bootstrap, "path": "/dns-query"})
+	}
+	members := make([]string, 0, len(c.Tunnels))
 	for _, t := range c.Tunnels {
 		p := protocols[t.Protocol]
 		o, err := t.options(p)
@@ -47,14 +81,23 @@ func Build(c Config) ([]byte, error) {
 		}
 		o["tag"] = tunnelTag(t.ID)
 		o["domain_resolver"] = "local" // the server's own name must not need a tunnel
+		if !p.endpoint && bootstrap != BootstrapSystem {
+			o["domain_resolver"] = bootstrapTag
+		}
 		if p.endpoint {
 			o["system"] = false // only the engine's tun creates a device
 			endpoints = append(endpoints, o)
 		} else {
 			outbounds = append(outbounds, o)
 		}
-		dnsServers = append(dnsServers, map[string]any{"type": "udp", "tag": "dns-" + tunnelTag(t.ID), "server": remote, "detour": tunnelTag(t.ID)})
+		members = append(members, tunnelTag(t.ID))
+		if named[t.ID] {
+			dnsServers = append(dnsServers, map[string]any{"type": "udp", "tag": "dns-" + tunnelTag(t.ID), "server": remote, "detour": tunnelTag(t.ID)})
+		}
 	}
+	// interrupt_exist_connections: after a switch, connections that were open
+	// through the old tunnel are closed, so nothing keeps using it.
+	outbounds = append(outbounds, map[string]any{"type": "selector", "tag": selectorTag, "outbounds": members, "interrupt_exist_connections": true})
 
 	tun := c.Inbound.Mode != "proxy"
 	routeRules := []map[string]any{{"action": "sniff"}}
@@ -84,12 +127,12 @@ func Build(c Config) ([]byte, error) {
 				// for local services); everything else resolves through the tunnel.
 				dnsRules = append(dnsRules, map[string]any{"rule_set": []string{declare(l.ID+"-dns", ruleset.DNSPath(dir, l.ID))}, "action": "route", "server": "local"})
 			case rules.Tunnel:
-				target := l.Tunnel
-				if target == "" {
-					target = def
+				target := selectorTag
+				if l.Tunnel != "" {
+					target = tunnelTag(l.Tunnel)
 				}
-				routeRules = append(routeRules, map[string]any{"rule_set": []string{tag}, "action": "route", "outbound": tunnelTag(target)})
-				if l.Tunnel != "" { // the default tunnel's resolver is the final one anyway
+				routeRules = append(routeRules, map[string]any{"rule_set": []string{tag}, "action": "route", "outbound": target})
+				if l.Tunnel != "" { // the selector's resolver is the final one anyway
 					dnsRules = append(dnsRules, map[string]any{"rule_set": []string{declare(l.ID+"-dns", ruleset.DNSPath(dir, l.ID))}, "action": "route", "server": "dns-" + tunnelTag(l.Tunnel)})
 				}
 			}
@@ -104,7 +147,7 @@ func Build(c Config) ([]byte, error) {
 		"default_domain_resolver": "local",
 		"rules":                   routeRules,
 		"rule_set":                ruleSets,
-		"final":                   tunnelTag(def),
+		"final":                   selectorTag,
 	}
 	var inbound map[string]any
 	if tun {
@@ -118,12 +161,16 @@ func Build(c Config) ([]byte, error) {
 		}
 	}
 	cfg := map[string]any{
-		"log":          map[string]any{"level": level, "timestamp": true},
-		"dns":          map[string]any{"servers": dnsServers, "rules": dnsRules, "final": "dns-" + tunnelTag(def)},
-		"inbounds":     []map[string]any{inbound},
-		"outbounds":    outbounds,
-		"route":        route,
-		"experimental": map[string]any{"cache_file": map[string]any{"enabled": true, "path": filepath.Join(c.WorkDir, "cache.db")}},
+		"log":       map[string]any{"level": level, "timestamp": true},
+		"dns":       map[string]any{"servers": dnsServers, "rules": dnsRules, "final": dnsSelectorTag},
+		"inbounds":  []map[string]any{inbound},
+		"outbounds": outbounds,
+		"route":     route,
+		// sing-box turns a cache file on by itself when the host passes a log writer (the
+		// engine does), and without a path it opens "cache.db" in the working directory:
+		// "/" for a service under launchd, which is read-only. So the path is always ours.
+		// It would also keep the selector's last choice; Engine.start removes the file first.
+		"experimental": map[string]any{"cache_file": map[string]any{"enabled": true, "path": cachePath(c.WorkDir)}},
 	}
 	if len(endpoints) > 0 {
 		cfg["endpoints"] = endpoints

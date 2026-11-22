@@ -76,7 +76,9 @@ type TunnelStatus struct {
 
 // Status is the engine's state; it is the truth, events only say it changed.
 type Status struct {
-	Running bool           `json:"running"`
+	Running bool `json:"running"`
+	// Default is the ID of the tunnel that carries traffic no list names.
+	Default string         `json:"default"`
 	Tunnels []TunnelStatus `json:"tunnels"`
 }
 
@@ -117,6 +119,7 @@ type Engine struct {
 
 	mu      sync.Mutex
 	running bool
+	def     string   // the selected (default) tunnel's ID
 	ids     []string // tunnel IDs in config order
 	status  map[string]*TunnelStatus
 	vpn     map[string]adapter.OpenVPNEndpoint
@@ -124,6 +127,14 @@ type Engine struct {
 	evMu   sync.RWMutex
 	events chan Event
 	closed bool
+}
+
+// defaultID is the tunnel that carries traffic no list names: Config.Default, or the first tunnel.
+func defaultID(c Config) string {
+	if c.Default != "" {
+		return c.Default
+	}
+	return c.Tunnels[0].ID
 }
 
 func tunnelIDs(c Config) []string {
@@ -139,7 +150,7 @@ func New(cfg Config) (*Engine, error) {
 	if _, err := Build(cfg); err != nil {
 		return nil, err
 	}
-	return &Engine{cfg: cfg, ids: tunnelIDs(cfg), events: make(chan Event, eventBuffer), status: map[string]*TunnelStatus{}}, nil
+	return &Engine{cfg: cfg, ids: tunnelIDs(cfg), def: defaultID(cfg), events: make(chan Event, eventBuffer), status: map[string]*TunnelStatus{}}, nil
 }
 
 // Events delivers state changes and log lines until Close.
@@ -187,6 +198,11 @@ func (e *Engine) start() error {
 	if err := os.MkdirAll(e.cfg.WorkDir, 0o700); err != nil {
 		return err
 	}
+	// The cache file would restore the selector's last choice over the one the app
+	// made. Nothing else in it is needed, so start without it.
+	if err := os.Remove(cachePath(e.cfg.WorkDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	ids := make([]string, 0, len(e.cfg.Lists))
 	for _, l := range e.cfg.Lists {
 		ids = append(ids, l.ID)
@@ -214,6 +230,11 @@ func (e *Engine) start() error {
 		inst.Close()
 		return fmt.Errorf("sing-box: %w", err)
 	}
+	// sing-box chooses the selector's first member until told otherwise: say which one.
+	if err := selectDefault(inst, defaultID(e.cfg)); err != nil {
+		inst.Close()
+		return err
+	}
 	wctx, cancel := context.WithCancel(context.Background())
 	e.inst, e.cancel, e.built = inst, cancel, built
 
@@ -233,11 +254,28 @@ func (e *Engine) start() error {
 		}
 	}
 	e.mu.Lock()
-	e.running, e.ids, e.status, e.vpn = true, tunnelIDs(e.cfg), status, vpn
+	e.running, e.ids, e.status, e.vpn, e.def = true, tunnelIDs(e.cfg), status, vpn, defaultID(e.cfg)
 	e.mu.Unlock()
 	for id, v := range vpn {
 		e.wg.Add(1)
 		go e.watch(wctx, id, v)
+	}
+	return nil
+}
+
+// selectDefault points the selector at tunnel id. Connections already open
+// through another member are closed (interrupt_exist_connections).
+func selectDefault(inst *box.Box, id string) error {
+	ob, ok := inst.Outbound().Outbound(selectorTag)
+	if !ok {
+		return errors.New("sing-box has no selector outbound")
+	}
+	sel, ok := ob.(interface{ SelectOutbound(string) bool })
+	if !ok {
+		return errors.New("the selector outbound can't be switched")
+	}
+	if !sel.SelectOutbound(tunnelTag(id)) {
+		return fmt.Errorf("tunnel %q is not in the selector", id)
 	}
 	return nil
 }
@@ -369,9 +407,15 @@ func (e *Engine) Reload(cfg Config) (restarted bool, err error) {
 	e.cfg = cfg
 	e.mu.Lock()
 	e.ids = tunnelIDs(cfg)
+	e.def = defaultID(cfg)
 	e.mu.Unlock()
-	if e.inst == nil || same {
+	if e.inst == nil {
 		return false, nil // stopped: takes effect at Start
+	}
+	if same {
+		// Build doesn't depend on the default tunnel, so a change of it lands
+		// here: switch the selector, no restart, no reconnect.
+		return false, selectDefault(e.inst, defaultID(cfg))
 	}
 	if err := e.stop(); err != nil {
 		return false, err
@@ -379,11 +423,36 @@ func (e *Engine) Reload(cfg Config) (restarted bool, err error) {
 	return true, e.start()
 }
 
+// Select makes tunnel id the one that carries traffic no list names. A running
+// engine switches at once without restarting; connections open through the
+// previous tunnel are closed. A stopped engine uses it from Start.
+func (e *Engine) Select(id string) error {
+	e.life.Lock()
+	defer e.life.Unlock()
+	found := false
+	for _, t := range e.cfg.Tunnels {
+		found = found || t.ID == id
+	}
+	if !found {
+		return fmt.Errorf("tunnel %q is not in the engine's config", id)
+	}
+	if e.inst != nil {
+		if err := selectDefault(e.inst, id); err != nil {
+			return err
+		}
+	}
+	e.cfg.Default = id
+	e.mu.Lock()
+	e.def = id
+	e.mu.Unlock()
+	return nil
+}
+
 // Status returns the engine's state; tunnels are in config order.
 func (e *Engine) Status() Status {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	s := Status{Running: e.running, Tunnels: make([]TunnelStatus, 0, len(e.ids))}
+	s := Status{Running: e.running, Default: e.def, Tunnels: make([]TunnelStatus, 0, len(e.ids))}
 	for _, id := range e.ids {
 		if st := e.status[id]; st != nil {
 			s.Tunnels = append(s.Tunnels, *st)

@@ -26,6 +26,9 @@ import (
 // gomobile) for the protocols the engine supports.
 const RequiredTags = "with_gvisor,with_quic,with_utls,with_wireguard,with_openvpn"
 
+// BootstrapSystem is DNS.Bootstrap for the system resolver.
+const BootstrapSystem = "system"
+
 // Config is everything the engine needs to run. Apps build it from their own
 // storage; the engine never writes to it.
 type Config struct {
@@ -67,6 +70,14 @@ type List struct {
 type DNS struct {
 	// Remote is the resolver reached through a tunnel. Default 1.1.1.1.
 	Remote string `json:"remote,omitempty"`
+	// Bootstrap is how the servers of proxy tunnels (VLESS, Trojan, ...) are
+	// found by name. Some networks answer for a filtered name with a private
+	// address (the ISP's block page), which makes the tunnel time out, so the
+	// default is DNS over HTTPS to a public resolver, outside every tunnel.
+	// It is the IP address of a DoH server (path /dns-query); empty means 1.1.1.1;
+	// "system" uses the system resolver, for a network that blocks DoH. OpenVPN
+	// tunnels always use the system resolver.
+	Bootstrap string `json:"bootstrap,omitempty"`
 }
 
 // Inbound is how traffic enters the engine.
@@ -91,7 +102,7 @@ var (
 	validID    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 	logLevels  = map[string]bool{"": true, "trace": true, "debug": true, "info": true, "warn": true, "error": true}
 	maxName    = 64
-	maxTunnels = 64
+	maxTunnels = 5000
 	maxLists   = 1024
 )
 
@@ -146,6 +157,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("dns remote %q: %w", c.DNS.Remote, err)
 		}
 	}
+	if c.DNS.Bootstrap != "" && c.DNS.Bootstrap != BootstrapSystem {
+		if _, err := netip.ParseAddr(c.DNS.Bootstrap); err != nil {
+			return fmt.Errorf("dns bootstrap %q must be an IP address or %q: %w", c.DNS.Bootstrap, BootstrapSystem, err)
+		}
+	}
 	if !logLevels[c.Log.Level] {
 		return fmt.Errorf("log level %q is not one of trace, debug, info, warn, error", c.Log.Level)
 	}
@@ -182,6 +198,22 @@ type protocol struct {
 
 var protocols = map[string]protocol{
 	"openvpn": {typ: "openvpn-client", endpoint: true},
+	// Proxy protocols: sing-box outbounds with no session of their own, so the
+	// engine reports them as ready (usable once it runs), not connected. Their
+	// options come from importers/links.
+	"vless":       {typ: "vless"},
+	"vmess":       {typ: "vmess"},
+	"trojan":      {typ: "trojan"},
+	"shadowsocks": {typ: "shadowsocks"},
+	"hysteria2":   {typ: "hysteria2"},
+	"tuic":        {typ: "tuic"},
+	"anytls":      {typ: "anytls"},
+}
+
+// CheckTunnel reports why options can't run as the protocol's tunnel, or nil.
+// Importers' output goes through it before an app stores anything.
+func CheckTunnel(protocol string, options []byte) error {
+	return Tunnel{ID: "check", Name: "check", Protocol: protocol, Options: options}.validate()
 }
 
 // Protocols lists the protocol names the engine accepts.
