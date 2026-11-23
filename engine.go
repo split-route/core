@@ -12,6 +12,7 @@ import (
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -446,6 +447,28 @@ func (e *Engine) Select(id string) error {
 	e.def = id
 	e.mu.Unlock()
 	return nil
+}
+
+// Test measures how long one request to link (an HTTP or HTTPS URL that answers
+// with a small body, like a generate_204 endpoint) takes through tunnel id, which
+// must be loaded in the running engine. It returns an error on a timeout (ctx) or
+// any failure. It never holds the lifecycle lock while it waits.
+func (e *Engine) Test(ctx context.Context, id, link string) (time.Duration, error) {
+	e.life.Lock()
+	inst := e.inst
+	e.life.Unlock()
+	if inst == nil {
+		return 0, errors.New("the engine isn't running")
+	}
+	ob, ok := inst.Outbound().Outbound(tunnelTag(id))
+	if !ok {
+		return 0, fmt.Errorf("tunnel %q is not loaded", id)
+	}
+	ms, err := urltest.URLTest(ctx, link, ob)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(ms) * time.Millisecond, nil
 }
 
 // Status returns the engine's state; tunnels are in config order.

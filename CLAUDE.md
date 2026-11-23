@@ -10,7 +10,7 @@ processes (a root service, a VPN service), so correctness and safety beat featur
 | Path | Role |
 |------|------|
 | `config.go`, `build.go` | `Config` and its validation (untrusted tunnel options are checked here); `Build` turns a Config into a sing-box config, purely and deterministically |
-| `engine.go` | `Engine`: one sing-box instance; `Start`, `Stop`, `Reload`, `Status`, `Events`, challenges |
+| `engine.go` | `Engine`: one sing-box instance; `Start`, `Stop`, `Reload`, `Status`, `Events`, challenges, `Test` (one timed request through a loaded tunnel) |
 | `ruleset/` | One list as sing-box source rule-set files, written in place so sing-box reloads them |
 | `rules/` | Entries (CIDR, domain, suffix, AS number), parsing and validation, actions |
 | `lists/` | List files, hosts files, domain sets; release downloads with `SHA256SUMS` and limits |

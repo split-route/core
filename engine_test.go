@@ -3,6 +3,7 @@
 package core
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -425,4 +426,32 @@ func TestEngineConcurrentLifecycle(t *testing.T) {
 		}
 	}
 	e.emit(Event{}) // after Close: must not panic
+}
+
+// Test refuses what it can't measure instead of hanging or panicking: a stopped
+// engine, a tunnel that isn't loaded, and a tunnel with no server to reach.
+func TestEngineTestRefusesWhatItCannotMeasure(t *testing.T) {
+	cfg := baseConfig(t)
+	cfg.WorkDir = shortDir(t)
+	cfg.Inbound.Port = freePort(t)
+	cfg.Tunnels = []Tunnel{pkiTunnel(t, "office")}
+	e, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := e.Test(ctx, "office", "http://127.0.0.1:1/generate_204"); err == nil {
+		t.Error("a stopped engine was tested")
+	}
+	if err := e.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Test(ctx, "nope", "http://127.0.0.1:1/generate_204"); err == nil {
+		t.Error("a tunnel that isn't loaded was tested")
+	}
+	if _, err := e.Test(ctx, "office", "http://127.0.0.1:1/generate_204"); err == nil {
+		t.Error("a tunnel with no server answered")
+	}
 }
