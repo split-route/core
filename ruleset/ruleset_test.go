@@ -115,3 +115,52 @@ func TestEnsureAndPrune(t *testing.T) {
 		t.Errorf("pruning a missing dir: %v", err)
 	}
 }
+
+func TestSourceHasTypedEntriesAndTheDNSTwinKeepsOnlyNames(t *testing.T) {
+	es, err := rules.ParseEntries([]string{"keyword:track", `regexp:^ads\d+\.`, "port:443", "port:8000-9000", "app:/Applications/Foo.app", "process:curl", "example.com", "203.0.113.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, twin := string(Source(es, true)), string(Source(es, false))
+	for _, want := range []string{`"domain_keyword":["track"]`, `"domain_regex"`, `"port":[443]`, `"port_range":["8000:9000"]`, `"process_path_regex":["(^|/)Applications/Foo\\.app(/|$)"]`, `"process_name":["curl"]`, `"ip_cidr"`} {
+		if !strings.Contains(full, want) {
+			t.Errorf("the full rule-set lacks %s:\n%s", want, full)
+		}
+	}
+	for _, want := range []string{`"domain_keyword"`, `"domain_regex"`, `"domain_suffix"`} {
+		if !strings.Contains(twin, want) {
+			t.Errorf("the names-only twin lacks %s:\n%s", want, twin)
+		}
+	}
+	for _, not := range []string{`"port"`, `"port_range"`, `"process_path_regex"`, `"process_name"`, `"ip_cidr"`} {
+		if strings.Contains(twin, not) {
+			t.Errorf("the names-only twin has %s:\n%s", not, twin)
+		}
+	}
+}
+
+// A list that changes between entries and a binary rule-set leaves no file of the old kind behind.
+func TestWriteFilesRemovesTheOtherKindOfMainFile(t *testing.T) {
+	dir := t.TempDir()
+	es, _ := rules.ParseEntries([]string{"example.com"})
+	if _, err := Write(dir, "l-1", rules.Direct, es); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFiles(dir, "l-1", map[string][]byte{"l-1.srs": []byte("SRS")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{Path(dir, "l-1"), DNSPath(dir, "l-1")} {
+		if _, err := os.Stat(gone); err == nil {
+			t.Errorf("%s is still there", gone)
+		}
+	}
+	if _, err := os.Stat(BinaryPath(dir, "l-1")); err != nil {
+		t.Error("the binary file is missing")
+	}
+	if err := Prune(dir, []string{"other"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(BinaryPath(dir, "l-1")); err == nil {
+		t.Error("Prune left a binary rule-set of a list that is gone")
+	}
+}

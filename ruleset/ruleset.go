@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -33,12 +34,16 @@ func Dir(workDir string) string { return filepath.Join(workDir, "rulesets") }
 func Path(dir, id string) string    { return filepath.Join(dir, id+".json") }
 func DNSPath(dir, id string) string { return filepath.Join(dir, id+".dns.json") }
 
+// BinaryPath is a list that is a sing-box binary rule-set (.srs) instead of entries.
+func BinaryPath(dir, id string) string { return filepath.Join(dir, id+".srs") }
+
 // Source is the rule-set in sing-box's source format. Each kind is its own rule
 // (a rule-set matches if any rule does), so matching never depends on how
-// fields combine within one rule. withIPs false leaves the CIDRs out.
-func Source(es rules.Entries, withIPs bool) []byte {
+// fields combine within one rule. full false is the names-only twin for the DNS rules: only what names a domain stays
+// (not addresses, ports or programs, which say nothing about which server a DNS answer should come from).
+func Source(es rules.Entries, full bool) []byte {
 	rs := []map[string]any{}
-	if withIPs {
+	if full {
 		var ips []string
 		for _, p := range es.V4 {
 			ips = append(ips, p.String())
@@ -63,6 +68,34 @@ func Source(es rules.Entries, withIPs bool) []byte {
 	if d := sortedUnique(es.Suffixes); len(d) > 0 {
 		rs = append(rs, map[string]any{"domain_suffix": d})
 	}
+	if d := sortedUnique(es.Keywords); len(d) > 0 {
+		rs = append(rs, map[string]any{"domain_keyword": d})
+	}
+	if d := sortedUnique(es.Regexes); len(d) > 0 {
+		rs = append(rs, map[string]any{"domain_regex": d})
+	}
+	if full {
+		if d := slices.Compact(slices.Sorted(slices.Values(es.Ports))); len(d) > 0 {
+			rs = append(rs, map[string]any{"port": d})
+		}
+		if d := sortedUnique(es.PortRanges); len(d) > 0 {
+			rs = append(rs, map[string]any{"port_range": d})
+		}
+		// An application is a folder of programs (helpers and renderers run from inside it), so the match is its path
+		// and everything under it. The path is escaped: it is text to match, not a pattern. It may follow a prefix:
+		// the system reports where a program really lives, which for some of Apple's own apps (Safari) is a cryptex
+		// path ending in /Applications/Safari.app, and for a copy on another volume starts with the volume.
+		var apps []string
+		for _, a := range sortedUnique(es.Apps) {
+			apps = append(apps, "(^|/)"+regexp.QuoteMeta(strings.TrimPrefix(a, "/"))+"(/|$)")
+		}
+		if len(apps) > 0 {
+			rs = append(rs, map[string]any{"process_path_regex": apps})
+		}
+		if d := sortedUnique(es.Processes); len(d) > 0 {
+			rs = append(rs, map[string]any{"process_name": d})
+		}
+	}
 	b, _ := json.Marshal(map[string]any{"version": 3, "rules": rs})
 	return b
 }
@@ -76,7 +109,7 @@ func sortedUnique(in []string) []string {
 // Files returns the files of a list by file name, and a warning when entries
 // can't be routed here (AS numbers need a list of their prefixes).
 func Files(id string, action rules.Action, es rules.Entries) (files map[string][]byte, warning string, err error) {
-	if n := len(es.V4) + len(es.V6) + len(es.Domains) + len(es.Suffixes); n > MaxEntries {
+	if n := es.Count() - len(es.ASNs); n > MaxEntries {
 		return nil, "", fmt.Errorf("list %s has %d entries; the limit is %d", id, n, MaxEntries)
 	}
 	if len(es.ASNs) > 0 {
@@ -99,8 +132,15 @@ func Write(dir, id string, action rules.Action, es rules.Entries) (warning strin
 	if err != nil {
 		return "", err
 	}
+	return warning, WriteFiles(dir, id, files)
+}
+
+// WriteFiles writes the files of one list (see Write for how). The list's main file is either <id>.json or <id>.srs: the one
+// it doesn't have is removed, so a list that changes kind leaves nothing stale. The names-only twin (<id>.dns.json) goes
+// when the files don't have one.
+func WriteFiles(dir, id string, files map[string][]byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+		return err
 	}
 	for name, b := range files {
 		p := filepath.Join(dir, name)
@@ -108,15 +148,24 @@ func Write(dir, id string, action rules.Action, es rules.Entries) (warning strin
 			continue
 		}
 		if err := os.WriteFile(p, b, 0o600); err != nil {
-			return "", err
+			return err
 		}
 	}
-	if _, ok := files[id+".dns.json"]; !ok {
-		if err := os.Remove(DNSPath(dir, id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return "", err
+	gone := []string{DNSPath(dir, id)}
+	if _, ok := files[id+".srs"]; ok {
+		gone = append(gone, Path(dir, id))
+	} else {
+		gone = append(gone, BinaryPath(dir, id))
+	}
+	for name := range files {
+		gone = slices.DeleteFunc(gone, func(p string) bool { return filepath.Base(p) == name })
+	}
+	for _, p := range gone {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
 		}
 	}
-	return warning, nil
+	return nil
 }
 
 // Ensure creates empty files for the lists that have none yet, so an engine can
@@ -138,7 +187,7 @@ func Ensure(dir, id string, action rules.Action) error {
 }
 
 // Prune removes the files of lists that are not in keep. The directory is the
-// engine's own (WorkDir/rulesets); only .json files are touched.
+// engine's own (WorkDir/rulesets); only .json and .srs files are touched.
 func Prune(dir string, keep []string) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -150,6 +199,9 @@ func Prune(dir string, keep []string) error {
 	for _, e := range entries {
 		name := e.Name()
 		id, ok := strings.CutSuffix(name, ".json")
+		if !ok {
+			id, ok = strings.CutSuffix(name, ".srs")
+		}
 		if !ok {
 			continue
 		}

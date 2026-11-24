@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/split-route/core/rules"
 	"github.com/split-route/core/ruleset"
@@ -110,9 +111,17 @@ func Build(c Config) ([]byte, error) {
 			// Strict routing sends the LAN into the tunnel too; keep it local.
 			map[string]any{"ip_is_private": true, "action": "route", "outbound": "direct"})
 	}
+	programs := false
+	for _, l := range c.Lists {
+		programs = programs || l.Programs
+	}
 	ruleSets, dnsRules := []map[string]any{}, []map[string]any{}
 	declare := func(tag, path string) string {
-		ruleSets = append(ruleSets, map[string]any{"type": "local", "tag": tag, "format": "source", "path": path})
+		format := "source"
+		if strings.HasSuffix(path, ".srs") {
+			format = "binary"
+		}
+		ruleSets = append(ruleSets, map[string]any{"type": "local", "tag": tag, "format": format, "path": path})
 		return tag
 	}
 	for _, tier := range []rules.Action{rules.Block, rules.Direct, rules.Tunnel} {
@@ -120,7 +129,11 @@ func Build(c Config) ([]byte, error) {
 			if l.Action != tier {
 				continue
 			}
-			tag := declare(l.ID, ruleset.Path(dir, l.ID))
+			mainPath := ruleset.Path(dir, l.ID)
+			if l.Binary {
+				mainPath = ruleset.BinaryPath(dir, l.ID)
+			}
+			tag := declare(l.ID, mainPath)
 			switch tier {
 			case rules.Block:
 				routeRules = append(routeRules, map[string]any{"rule_set": []string{tag}, "action": "reject"})
@@ -168,6 +181,7 @@ func Build(c Config) ([]byte, error) {
 	}
 	route := map[string]any{
 		"default_domain_resolver": "local",
+		"find_process":            programs,
 		"rules":                   routeRules,
 		"rule_set":                ruleSets,
 		"final":                   final,

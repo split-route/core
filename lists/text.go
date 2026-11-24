@@ -14,6 +14,9 @@ import (
 // full ads list) are under 200k entries.
 const MaxImportEntries = 500_000
 
+// MaxImportRegexes caps the patterns one import may hold: each is matched against every name looked up.
+const MaxImportRegexes = 1000
+
 // hostsSkip are names hosts files map to themselves; never list entries.
 var hostsSkip = map[string]bool{
 	"localhost": true, "localhost.localdomain": true, "local": true, "broadcasthost": true,
@@ -24,7 +27,9 @@ var hostsSkip = map[string]bool{
 // ParseText reads a third-party list in the plain formats most lists use:
 //
 //   - one entry per line in rules.ParseEntry syntax (203.0.113.0/24,
-//     example.com, full:www.example.com, AS13335);
+//     example.com, full:www.example.com, keyword:google, regexp:^ads[0-9]+\.,
+//     port:443, AS13335). app: and process: name programs on one Mac, which a
+//     shared list can't know, so they are skipped here and counted;
 //   - hosts-file lines ("0.0.0.0 ads.example.com tracker.example.com"): each
 //     name is an exact domain, because a hosts file blocks exactly that name;
 //   - "#" and "!" comment lines, and "#" comments after an entry;
@@ -85,7 +90,7 @@ func ParseText(b []byte) (rules.Entries, Stats, error) {
 			}
 			continue
 		}
-		if strings.HasPrefix(line, "||") || strings.ContainsAny(line, "$^|@") {
+		if !rules.HasTypedPrefix(line) && (strings.HasPrefix(line, "||") || strings.ContainsAny(line, "$^|@")) {
 			st.Other++ // adblock syntax: its own parser, later
 			continue
 		}
@@ -109,8 +114,12 @@ func ParseText(b []byte) (rules.Entries, Stats, error) {
 		default:
 			e, err = rules.ParseEntry(line)
 		}
-		if err != nil {
+		if err != nil || e.Kind == rules.App || e.Kind == rules.Process {
 			st.Invalid++
+			continue
+		}
+		if e.Kind == rules.Regex && len(es.Regexes) >= MaxImportRegexes {
+			st.Other++
 			continue
 		}
 		add(e)

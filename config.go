@@ -80,6 +80,12 @@ type List struct {
 	Action rules.Action `json:"action"`
 	// Tunnel is the tunnel's ID for the tunnel action; empty means the default.
 	Tunnel string `json:"tunnel,omitempty"`
+	// Binary is whether the list is a sing-box binary rule-set (an imported .srs, or one built from rules) and not entries.
+	Binary bool `json:"binary,omitempty"`
+	// Programs is whether the list names applications or processes. The engine then looks up which program owns each
+	// connection, which costs a little per connection, so it is only on when a list needs it. Changing it restarts the
+	// engine (the one thing about a list's entries that the built config depends on).
+	Programs bool `json:"programs,omitempty"`
 }
 
 // DNS is how names are resolved. Names in direct lists resolve on the physical
