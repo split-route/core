@@ -12,15 +12,13 @@ import (
 // routing here, or refused by name. Dropping remote-cert-tls, verify-x509-name
 // or a tls-crypt key silently would leave a tunnel anyone could intercept.
 //
-// user and pass are put in the endpoint only when the profile asks for them.
+// user and pass are put in the endpoint only when the profile asks for them. keyPass opens an encrypted
+// private key (see DecryptKey); with the key unencrypted it is ignored.
 // sing-box's TLS layer is Go's, so names differ from OpenSSL's; the
 // translations below were found by trial against `sing-box check`.
-func Endpoint(p Profile, tag, user, pass string) (map[string]any, error) {
+func Endpoint(p Profile, tag, user, pass, keyPass string) (map[string]any, error) {
 	if p.Connection {
 		return nil, fmt.Errorf("<connection> blocks (options per remote) are not supported by the tunnel engine")
-	}
-	if p.KeyEncrypted {
-		return nil, fmt.Errorf("an encrypted private key is not supported by the tunnel engine")
 	}
 	ep := map[string]any{"type": "openvpn-client", "tag": tag, "mode": "tls", "system": false, "auth_retry": "none"}
 	tls := map[string]any{}
@@ -233,6 +231,13 @@ func Endpoint(p Profile, tag, user, pass string) (map[string]any, error) {
 		bad("the profile has no inline <ca> block")
 	}
 	cert, key := lines("cert"), lines("key")
+	if p.KeyEncrypted && key != nil {
+		plain, err := DecryptKey(p.Blocks["key"], keyPass)
+		if err != nil {
+			return nil, err
+		}
+		key = strings.Split(strings.TrimSpace(plain), "\n")
+	}
 	switch {
 	case cert != nil && key != nil:
 		tls["client_certificate"], tls["client_key"] = cert, key

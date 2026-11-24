@@ -21,7 +21,7 @@ func ovpnTunnel(t *testing.T, id, name string) Tunnel {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ep, err := openvpn.Endpoint(p, "x", "", "")
+	ep, err := openvpn.Endpoint(p, "x", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,10 @@ func ruleOrder(cfg map[string]any) []string {
 			if o, ok := m["outbound"]; ok {
 				s += ">" + o.(string)
 			}
-			order = append(order, s+":"+m["rule_set"].([]any)[0].(string))
+			if rs, ok := m["rule_set"].([]any); ok {
+				s += ":" + rs[0].(string)
+			}
+			order = append(order, s)
 		}
 	}
 	return order
@@ -367,5 +370,93 @@ func TestBuildResolvesProxyServersOverDoH(t *testing.T) {
 	c.DNS.Bootstrap = "dns.example.com"
 	if _, err := Build(c); err == nil {
 		t.Error("a bootstrap that is not an IP address or \"system\" was accepted")
+	}
+}
+
+// The final route is what no list matched: direct, blocked by a last rule, a named tunnel, or the selector.
+func TestBuildFinalRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		final        Final
+		wantFinal    string
+		wantDNS      string
+		wantLastRule string // "" when the rules end with the list rules
+	}{
+		{"default", Final{}, "selected", "dns-selected", ""},
+		{"tunnel", Final{Action: rules.Tunnel}, "selected", "dns-selected", ""},
+		{"named tunnel", Final{Action: rules.Tunnel, Tunnel: "home"}, "t-home", "dns-t-home", ""},
+		{"direct", Final{Action: rules.Direct}, "direct", "local", ""},
+		{"block", Final{Action: rules.Block}, "selected", "dns-selected", "reject"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := baseConfig(t)
+			c.Inbound = Inbound{}
+			c.Lists = []List{{ID: "ads", Name: "Ads", Action: rules.Block}}
+			c.Final = tc.final
+			b, err := Build(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := parse(t, b)
+			if got := cfg["route"].(map[string]any)["final"]; got != tc.wantFinal {
+				t.Errorf("route.final = %v, want %s", got, tc.wantFinal)
+			}
+			if got := cfg["dns"].(map[string]any)["final"]; got != tc.wantDNS {
+				t.Errorf("dns.final = %v, want %s", got, tc.wantDNS)
+			}
+			order := ruleOrder(cfg)
+			last := order[len(order)-1]
+			if tc.wantLastRule == "" && last != "reject:ads" || tc.wantLastRule != "" && last != tc.wantLastRule {
+				t.Errorf("last rule = %s (order %v)", last, order)
+			}
+		})
+	}
+}
+
+func TestValidateFinalRoute(t *testing.T) {
+	for name, f := range map[string]Final{
+		"unknown action":          {Action: "maybe"},
+		"a tunnel on direct":      {Action: rules.Direct, Tunnel: "home"},
+		"a tunnel with no action": {Tunnel: "home"},
+		"a missing tunnel":        {Action: rules.Tunnel, Tunnel: "nope"},
+	} {
+		c := baseConfig(t)
+		c.Final = f
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// BlockQUIC refuses UDP port 443 after the lists and before the final route, and only when asked for.
+func TestBuildBlockQUIC(t *testing.T) {
+	c := baseConfig(t)
+	c.Inbound = Inbound{}
+	c.Lists = []List{{ID: "ads", Name: "Ads", Action: rules.Block}, {ID: "work", Name: "Work", Action: rules.Direct}}
+	quic := func(cfg map[string]any) int {
+		for i, r := range cfg["route"].(map[string]any)["rules"].([]any) {
+			if m := r.(map[string]any); m["network"] == "udp" && m["port"] == float64(443) && m["action"] == "reject" {
+				return i
+			}
+		}
+		return -1
+	}
+	b, err := Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quic(parse(t, b)) != -1 {
+		t.Error("a QUIC rule without BlockQUIC")
+	}
+	c.BlockQUIC = true
+	b, err = Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := parse(t, b)
+	order := ruleOrder(cfg)
+	i := quic(cfg)
+	if i != len(order)-1 || i < 2 {
+		t.Errorf("the QUIC rule is at %d in %v: it must come after every list", i, order)
 	}
 }

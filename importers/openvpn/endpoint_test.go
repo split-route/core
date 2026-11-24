@@ -67,7 +67,7 @@ func endpointOf(t *testing.T, text, user, pass string) (map[string]any, error) {
 	if err != nil {
 		t.Fatalf("ParseProfile: %v", err)
 	}
-	return Endpoint(p, "ovpn", user, pass)
+	return Endpoint(p, "ovpn", user, pass, "")
 }
 
 func TestEndpoint(t *testing.T) {
@@ -121,7 +121,7 @@ func TestSingboxEndpointFailsClosed(t *testing.T) {
 		{"unknown group", "tls-groups X25519:ffdhe2048\n", "ffdhe2048"},
 		{"bad proto", "proto tcp-server\n", "tcp-server"},
 		{"bad number", "tun-mtu lots\n", "tun-mtu"},
-		{"encrypted key", "-----BEGIN PRIVATE KEY-----\nKEY\n", "encrypted"},
+		{"encrypted key, no password", "-----BEGIN PRIVATE KEY-----\nKEY\n", "key password"},
 		{"connection block", "+<connection>\n", "connection"},
 		{"no ca", "<ca>\n-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n</ca>\n", "<ca>"},
 		{"two wraps", "+tls-auth-extra\n", "tls-auth-extra"},
@@ -133,7 +133,7 @@ func TestSingboxEndpointFailsClosed(t *testing.T) {
 			text += "<connection>\nremote b.example.net 1194 udp\n</connection>\n"
 		case strings.HasPrefix(c.edit, "+"):
 			text += strings.TrimPrefix(c.edit, "+")
-		case c.name == "encrypted key":
+		case c.name == "encrypted key, no password":
 			text = strings.Replace(text, c.edit, "-----BEGIN ENCRYPTED PRIVATE KEY-----\nKEY\n", 1)
 		case c.name == "no ca":
 			text = strings.Replace(text, c.edit, "", 1)
@@ -153,7 +153,7 @@ func TestSingboxEndpointFailsClosed(t *testing.T) {
 			t.Errorf("%s: ParseProfile: %v", c.name, err)
 			continue
 		}
-		if _, err := Endpoint(p, "ovpn", "u", "p"); err == nil || !strings.Contains(err.Error(), c.want) {
+		if _, err := Endpoint(p, "ovpn", "u", "p", ""); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err = %v, want one naming %q", c.name, err, c.want)
 		}
 	}
@@ -164,7 +164,7 @@ func TestSingboxEndpointFailsClosed(t *testing.T) {
 	// A TLS-crypt key is not optional: dropping it must not happen silently.
 	p, _ := Parse([]byte(aliLike))
 	delete(p.Blocks, "tls-crypt-v2")
-	if ep, err := Endpoint(p, "ovpn", "u", "p"); err == nil && ep["tls"].(map[string]any)["control_wrap"] != nil {
+	if ep, err := Endpoint(p, "ovpn", "u", "p", ""); err == nil && ep["tls"].(map[string]any)["control_wrap"] != nil {
 		t.Error("control_wrap present without a key")
 	}
 }

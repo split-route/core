@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-const pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+const certPEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
 
 func TestParse(t *testing.T) {
-	base := "client\ndev tun\nremote vpn.example.com 443 tcp\n<ca>\n" + pem + "\n</ca>\n"
+	base := "client\ndev tun\nremote vpn.example.com 443 tcp\n<ca>\n" + certPEM + "\n</ca>\n"
 	tests := []struct {
 		name    string
 		text    string

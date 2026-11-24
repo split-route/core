@@ -72,7 +72,7 @@ func pkiTunnel(t *testing.T, id string) Tunnel {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ep, err := openvpn.Endpoint(p, "x", "", "")
+	ep, err := openvpn.Endpoint(p, "x", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestEngineLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ep, err := openvpn.Endpoint(p, "x", "", "")
+	ep, err := openvpn.Endpoint(p, "x", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

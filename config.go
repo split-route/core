@@ -36,9 +36,16 @@ type Config struct {
 	Lists   []List   `json:"lists"`
 	// Default is the tunnel's ID that carries unmatched traffic and lists that
 	// name no tunnel. Empty: the first tunnel.
-	Default string  `json:"default,omitempty"`
-	DNS     DNS     `json:"dns,omitempty"`
-	Inbound Inbound `json:"inbound,omitempty"`
+	Default string `json:"default,omitempty"`
+	// Final is where traffic that no list matches goes. The zero value is the
+	// default tunnel.
+	Final Final `json:"final,omitempty"`
+	// BlockQUIC refuses QUIC (UDP to port 443) that no list matched, so a browser retries over TCP, where a name
+	// can be read from the TLS handshake. A QUIC handshake the engine can't read hides the name, and a list
+	// that matches by name then lets it through.
+	BlockQUIC bool    `json:"block_quic,omitempty"`
+	DNS       DNS     `json:"dns,omitempty"`
+	Inbound   Inbound `json:"inbound,omitempty"`
 	// WorkDir is a directory the engine may write to (rule-set files, cache).
 	// It must be absolute and private to the app.
 	WorkDir string `json:"work_dir"`
@@ -52,6 +59,16 @@ type Tunnel struct {
 	Name     string          `json:"name"`
 	Protocol string          `json:"protocol"`
 	Options  json.RawMessage `json:"options"`
+}
+
+// Final is the route of everything no list matches: direct, blocked, or through
+// a tunnel (Tunnel empty: the default tunnel, which can be switched without a
+// restart; a named one is fixed in the config).
+type Final struct {
+	// Action is direct, block or tunnel. Empty means tunnel.
+	Action rules.Action `json:"action,omitempty"`
+	// Tunnel is the tunnel's ID for the tunnel action; empty means the default.
+	Tunnel string `json:"tunnel,omitempty"`
 }
 
 // List says where the traffic that matches a list goes. Its entries live in
@@ -133,6 +150,14 @@ func (c Config) Validate() error {
 	}
 	if c.Default != "" && !tunnels[c.Default] {
 		return fmt.Errorf("default tunnel %q does not exist", c.Default)
+	}
+	switch f := c.Final; {
+	case f.Action != "" && !f.Action.Valid():
+		return fmt.Errorf("final route: action must be direct, block or tunnel, not %q", f.Action)
+	case f.Tunnel != "" && f.Action != rules.Tunnel:
+		return fmt.Errorf("final route: only the tunnel action can name a tunnel")
+	case f.Tunnel != "" && !tunnels[f.Tunnel]:
+		return fmt.Errorf("final route: tunnel %q does not exist", f.Tunnel)
 	}
 	lists := map[string]bool{}
 	for _, l := range c.Lists {

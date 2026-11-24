@@ -28,6 +28,8 @@ processes (a root service, a VPN service), so correctness and safety beat featur
   `Start`, because sing-box would otherwise use the first member or a cached selection; the config has no cache
   file for that reason). So switching the default tunnel never restarts the engine. Starting proxy tunnels is
   fast (about 30 ms for 5, 130 ms for 500; a restart 50 to 180 ms): keep it that way, `TestRestartAndStartAreFast...`.
+- `Config.Final` is the route of what no list matched (direct, block via a last `reject` rule, a named tunnel, or the selector by default). Unlike the default tunnel it is in the built config, so changing it restarts the engine.
+- `Config.BlockQUIC` adds a `reject` rule for UDP port 443 after every list and before the final route: the engine reads names from QUIC, but a handshake it can't read (or a browser that keeps old sessions) hides one, and a block list then misses it. The browser falls back to TCP, where the name is in the TLS handshake. Only QUIC no list matched is refused.
 - `Build` never depends on a list's entries, so editing a list never restarts the engine. A change to the lists'
   structure, the tunnels or the DNS does, and `Reload` says so.
 - Tunnel options are untrusted: refuse `*_path` keys, `detour`, `bind_interface`, `routing_mark`, `protect_path`,
@@ -43,6 +45,7 @@ processes (a root service, a VPN service), so correctness and safety beat featur
 - Never use `auth_retry: interact` for OpenVPN (it retries with empty credentials: account lockout).
 - sing-box registers protocols by build tag: apps build with `core.RequiredTags`. Anything that starts the engine
   in a test needs the tags.
+- `RuleSetText` (root package, because it uses sing-box's `common/srs`) turns a binary `.srs` rule-set into list text; what a list of entries can't say is counted as skipped, never guessed. The cheap packages stay free of sing-box.
 - Every bug fix gets a table test; parsers get a fixture copied from real output. English only.
 
 ## Verify

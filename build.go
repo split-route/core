@@ -62,6 +62,9 @@ func Build(c Config) ([]byte, error) {
 			named[l.Tunnel] = true
 		}
 	}
+	if c.Final.Action == rules.Tunnel && c.Final.Tunnel != "" {
+		named[c.Final.Tunnel] = true
+	}
 
 	var endpoints []map[string]any
 	outbounds := []map[string]any{{"type": "direct", "tag": "direct"}}
@@ -139,6 +142,26 @@ func Build(c Config) ([]byte, error) {
 		}
 	}
 
+	// QUIC no list matched is refused, after every list: a flow whose name was read already matched a list above
+	// (and QUIC to a listed server goes where its list says), so only the unreadable or unlisted is turned away.
+	if c.BlockQUIC {
+		routeRules = append(routeRules, map[string]any{"network": "udp", "port": 443, "action": "reject"})
+	}
+
+	// The final route: what no list matched. Unlike the default tunnel, a change here changes the config,
+	// so the engine restarts.
+	final, dnsFinal := selectorTag, dnsSelectorTag
+	switch c.Final.Action {
+	case rules.Direct:
+		final, dnsFinal = "direct", "local" // everything else is direct, so it resolves on the physical network too
+	case rules.Block:
+		routeRules = append(routeRules, map[string]any{"action": "reject"}) // matches whatever the rules above did not
+	case rules.Tunnel:
+		if c.Final.Tunnel != "" {
+			final, dnsFinal = tunnelTag(c.Final.Tunnel), "dns-"+tunnelTag(c.Final.Tunnel)
+		}
+	}
+
 	level := c.Log.Level
 	if level == "" {
 		level = "info"
@@ -147,7 +170,7 @@ func Build(c Config) ([]byte, error) {
 		"default_domain_resolver": "local",
 		"rules":                   routeRules,
 		"rule_set":                ruleSets,
-		"final":                   selectorTag,
+		"final":                   final,
 	}
 	var inbound map[string]any
 	if tun {
@@ -162,7 +185,7 @@ func Build(c Config) ([]byte, error) {
 	}
 	cfg := map[string]any{
 		"log":       map[string]any{"level": level, "timestamp": true},
-		"dns":       map[string]any{"servers": dnsServers, "rules": dnsRules, "final": dnsSelectorTag},
+		"dns":       map[string]any{"servers": dnsServers, "rules": dnsRules, "final": dnsFinal},
 		"inbounds":  []map[string]any{inbound},
 		"outbounds": outbounds,
 		"route":     route,
