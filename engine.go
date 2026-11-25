@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -17,6 +21,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json"
+	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/split-route/core/ruleset"
 )
@@ -469,6 +474,55 @@ func (e *Engine) Test(ctx context.Context, id, link string) (time.Duration, erro
 		return 0, err
 	}
 	return time.Duration(ms) * time.Millisecond, nil
+}
+
+// Fetch makes one HTTPS GET to link through the selected tunnel (the one that carries what no list names) and returns the
+// body, at most max bytes (more is an error). The address is the caller's and must be https; the lookup of its name is
+// made by the tunnel. It is for what an app wants to know about the connection itself, such as the address the
+// internet sees. It never holds the lifecycle lock while it waits.
+func (e *Engine) Fetch(ctx context.Context, link string, max int64) ([]byte, error) {
+	u, err := url.Parse(link)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
+		return nil, errors.New("the address must be an https address")
+	}
+	e.life.Lock()
+	inst := e.inst
+	e.life.Unlock()
+	if inst == nil {
+		return nil, errors.New("the engine isn't running")
+	}
+	ob, ok := inst.Outbound().Outbound(selectorTag)
+	if !ok {
+		return nil, errors.New("no tunnel is selected")
+	}
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return ob.DialContext(ctx, network, M.ParseSocksaddr(addr))
+		},
+		TLSHandshakeTimeout: 10 * time.Second,
+		DisableKeepAlives:   true,
+	}}
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("the server answered HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("the answer is larger than %d bytes", max)
+	}
+	return body, nil
 }
 
 // Status returns the engine's state; tunnels are in config order.

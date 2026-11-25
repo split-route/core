@@ -16,9 +16,15 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	box "github.com/sagernet/sing-box"
+	"github.com/sagernet/sing-box/include"
+	"github.com/sagernet/sing-box/option"
+	singjson "github.com/sagernet/sing/common/json"
 
 	"github.com/split-route/core/importers/openvpn"
 	"github.com/split-route/core/rules"
@@ -453,5 +459,72 @@ func TestEngineTestRefusesWhatItCannotMeasure(t *testing.T) {
 	}
 	if _, err := e.Test(ctx, "office", "http://127.0.0.1:1/generate_204"); err == nil {
 		t.Error("a tunnel with no server answered")
+	}
+}
+
+// The tun config the engine builds must be one sing-box accepts, IPv6 handling included. Creating the box is as far as
+// a test can go without root (starting the tun device needs it).
+func TestBuiltTunConfigIsAcceptedBySingBox(t *testing.T) {
+	for name, c := range map[string]Config{
+		"plain":      {},
+		"block ipv6": {BlockIPv6: true},
+		"everything": {BlockIPv6: true, BlockSTUN: true, BlockQUIC: true, TLSFingerprint: "chrome"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c.Tunnels = []Tunnel{{ID: "n1", Name: "n", Protocol: "trojan", Options: []byte(`{"type":"trojan","server":"a.example.com","server_port":443,"password":"x","tls":{"enabled":true}}`)}}
+			c.WorkDir = shortDir(t)
+			built, err := Build(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := include.Context(context.Background())
+			var opts option.Options
+			if err := singjson.UnmarshalContext(ctx, built, &opts); err != nil {
+				t.Fatalf("sing-box can't read the config: %v", err)
+			}
+			inst, err := box.New(box.Options{Context: ctx, Options: opts})
+			if err != nil {
+				t.Fatalf("sing-box refused the config: %v", err)
+			}
+			inst.Close()
+		})
+	}
+}
+
+// The control for the test above: it must fail on a rule sing-box doesn't know, or passing there means nothing.
+func TestSingBoxAcceptanceTestCatchesABadRule(t *testing.T) {
+	built, err := Build(Config{BlockIPv6: true, WorkDir: shortDir(t), Tunnels: []Tunnel{{ID: "n1", Name: "n", Protocol: "trojan", Options: []byte(`{"type":"trojan","server":"a.example.com","server_port":443,"password":"x"}`)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := strings.Replace(string(built), `"action":"predefined"`, `"action":"nonsense"`, 1)
+	if bad == string(built) {
+		t.Fatal("the config has no predefined rule to break")
+	}
+	ctx := include.Context(context.Background())
+	var opts option.Options
+	if err := singjson.UnmarshalContext(ctx, []byte(bad), &opts); err == nil {
+		inst, err := box.New(box.Options{Context: ctx, Options: opts})
+		if err == nil {
+			inst.Close()
+			t.Fatal("sing-box accepted a rule with an unknown action: the acceptance test proves nothing")
+		}
+	}
+}
+
+func TestFetchRefusesWhatItShould(t *testing.T) {
+	e, err := New(Config{Tunnels: []Tunnel{{ID: "n1", Name: "n", Protocol: "trojan", Options: []byte(`{"type":"trojan","server":"a.example.com","server_port":443,"password":"x"}`)}},
+		WorkDir: shortDir(t), Inbound: Inbound{Mode: "proxy", Listen: "127.0.0.1", Port: freePort(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, bad := range []string{"http://example.com/", "ftp://example.com/", "https://", "https://u:p@example.com/", "not a url", ""} {
+		if _, err := e.Fetch(ctx, bad, 1024); err == nil || !strings.Contains(err.Error(), "https") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	if _, err := e.Fetch(ctx, "https://example.com/", 1024); err == nil || !strings.Contains(err.Error(), "isn't running") {
+		t.Errorf("a stopped engine: %v", err)
 	}
 }

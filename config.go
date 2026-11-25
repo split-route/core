@@ -54,6 +54,11 @@ type Config struct {
 	// BlockSTUN refuses STUN, the probe WebRTC uses to learn a public IP address: with split routing a browser's
 	// probe can go direct and show the real address while the page's traffic goes through a tunnel.
 	BlockSTUN bool `json:"block_stun,omitempty"`
+	// BlockIPv6 refuses IPv6 (the tun carries IPv4 only, so on a network with IPv6 a browser can reach a site around the
+	// tunnel and show the real address): the tun gets an IPv6 address so the system sends IPv6 into it, where it is
+	// rejected, and apps' AAAA lookups are answered empty so they use IPv4 at once. The engine's own lookups of servers'
+	// names are not touched. Tun mode only.
+	BlockIPv6 bool `json:"block_ipv6,omitempty"`
 	// TLSFingerprint makes the TLS handshake of vless, vmess and trojan tunnels look like this browser's (one of
 	// TLSFingerprints). A tunnel whose options already choose a fingerprint keeps it. Empty: each tunnel's own.
 	TLSFingerprint string  `json:"tls_fingerprint,omitempty"`

@@ -114,12 +114,20 @@ func Build(c Config) ([]byte, error) {
 			map[string]any{"protocol": "dns", "action": "hijack-dns"},
 			// Strict routing sends the LAN into the tunnel too; keep it local.
 			map[string]any{"ip_is_private": true, "action": "route", "outbound": "direct"})
+		if c.BlockIPv6 { // after the LAN rule: the local network's own IPv6 stays local
+			routeRules = append(routeRules, map[string]any{"ip_version": 6, "action": "reject"})
+		}
 	}
 	programs := false
 	for _, l := range c.Lists {
 		programs = programs || l.Programs
 	}
 	ruleSets, dnsRules := []map[string]any{}, []map[string]any{}
+	if tun && c.BlockIPv6 {
+		// What applications ask (through the hijack): no IPv6 address for any name. A lookup the engine makes for a
+		// server's name names its resolver and skips these rules, so servers on IPv6-only networks are still found.
+		dnsRules = append(dnsRules, map[string]any{"query_type": []string{"AAAA"}, "action": "predefined", "rcode": "NOERROR"})
+	}
 	declare := func(tag, path string) string {
 		format := "source"
 		if strings.HasSuffix(path, ".srs") {
@@ -194,7 +202,11 @@ func Build(c Config) ([]byte, error) {
 	if tun {
 		// The engine's own sockets (to the tunnels' servers) must not enter its tun.
 		route["auto_detect_interface"] = true
-		inbound = map[string]any{"type": "tun", "tag": "tun-in", "address": []string{"172.19.0.1/30"}, "auto_route": true, "strict_route": true, "stack": "system"}
+		addresses := []string{"172.19.0.1/30"}
+		if c.BlockIPv6 {
+			addresses = append(addresses, "fdfe:dcba:9876::1/126") // so the system sends IPv6 into the tun, to be refused
+		}
+		inbound = map[string]any{"type": "tun", "tag": "tun-in", "address": addresses, "auto_route": true, "strict_route": true, "stack": "system"}
 	} else {
 		inbound = map[string]any{"type": "mixed", "tag": "proxy-in", "listen": c.Inbound.Listen, "listen_port": c.Inbound.Port}
 		if c.Inbound.User != "" {

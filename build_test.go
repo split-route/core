@@ -542,3 +542,61 @@ func TestBuildTLSFingerprint(t *testing.T) {
 		t.Error("an unknown fingerprint was accepted")
 	}
 }
+
+// BlockIPv6 (tun mode): an IPv6 address on the tun, the reject rule right after the LAN rule, and an empty answer for
+// AAAA questions from applications; nothing of it without the setting or in proxy mode.
+func TestBuildBlockIPv6(t *testing.T) {
+	c := baseConfig(t)
+	c.Inbound = Inbound{} // tun
+	has := func(cfg map[string]any) (addr bool, ruleAt int, dns bool) {
+		ruleAt = -1
+		for i, r := range cfg["route"].(map[string]any)["rules"].([]any) {
+			if m := r.(map[string]any); m["ip_version"] == float64(6) && m["action"] == "reject" {
+				ruleAt = i
+			}
+		}
+		addrs, _ := cfg["inbounds"].([]any)[0].(map[string]any)["address"].([]any) // a proxy inbound has none
+		for _, a := range addrs {
+			addr = addr || strings.Contains(a.(string), ":")
+		}
+		for _, r := range cfg["dns"].(map[string]any)["rules"].([]any) {
+			if m := r.(map[string]any); m["action"] == "predefined" && m["rcode"] == "NOERROR" {
+				dns = true
+			}
+		}
+		return
+	}
+	b, err := Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, r, d := has(parse(t, b)); a || r != -1 || d {
+		t.Errorf("IPv6 handling without the setting: %v %v %v", a, r, d)
+	}
+	c.BlockIPv6 = true
+	b, err = Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := parse(t, b)
+	a, r, d := has(cfg)
+	if !a || !d {
+		t.Errorf("tun address %v, dns rule %v", a, d)
+	}
+	// route rules: sniff, dns hijack, LAN, then the IPv6 rule.
+	order := ruleOrder(cfg)
+	if r != 3 {
+		t.Errorf("the IPv6 rule is at %d in %v: it must follow the LAN rule", r, order)
+	}
+	if strings.Contains(string(b), `"strategy":"ipv4_only"`) {
+		t.Error("a global IPv4-only strategy would reach the engine's own lookups of servers' names")
+	}
+	c.Inbound = Inbound{Mode: "proxy", Listen: "127.0.0.1", Port: 18080}
+	b, err = Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, r, d := has(parse(t, b)); r != -1 || d {
+		t.Errorf("proxy mode must have no IPv6 rules: %v %v %v", a, r, d)
+	}
+}
