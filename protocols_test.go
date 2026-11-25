@@ -344,3 +344,27 @@ func TestStartKeepsItsCacheInTheWorkDir(t *testing.T) {
 		t.Errorf("a damaged cache stopped the engine: %v", err)
 	}
 }
+
+// sing-box must accept the uTLS block the engine adds for a fingerprint, on every protocol it is added to.
+func TestEngineStartsWithATLSFingerprintAndSTUNBlock(t *testing.T) {
+	const id = "b831381d-6324-4d53-ad4f-8cda48b30811"
+	for name, tun := range map[string]Tunnel{
+		"trojan": {ID: "n1", Name: "n", Protocol: "trojan", Options: []byte(`{"type":"trojan","server":"a.example.com","server_port":443,"password":"x","tls":{"enabled":true,"server_name":"a.example.com"}}`)},
+		"vless":  {ID: "n1", Name: "n", Protocol: "vless", Options: []byte(`{"type":"vless","server":"a.example.com","server_port":443,"uuid":"` + id + `","tls":{"enabled":true,"server_name":"a.example.com"}}`)},
+		"vmess":  {ID: "n1", Name: "n", Protocol: "vmess", Options: []byte(`{"type":"vmess","server":"a.example.com","server_port":443,"uuid":"` + id + `","security":"auto","tls":{"enabled":true,"server_name":"a.example.com"}}`)},
+	} {
+		for _, fp := range TLSFingerprints {
+			t.Run(name+"/"+fp, func(t *testing.T) {
+				e, err := New(Config{Tunnels: []Tunnel{tun}, WorkDir: shortDir(t), BlockSTUN: true, TLSFingerprint: fp,
+					Inbound: Inbound{Mode: "proxy", Listen: "127.0.0.1", Port: freePort(t)}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := e.Start(); err != nil {
+					t.Fatalf("the engine refused fingerprint %s: %v", fp, err)
+				}
+				e.Stop()
+			})
+		}
+	}
+}

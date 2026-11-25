@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/split-route/core/rules"
@@ -25,6 +26,12 @@ import (
 // RequiredTags are the sing-box build tags an app must pass to `go build` (or
 // gomobile) for the protocols the engine supports.
 const RequiredTags = "with_gvisor,with_quic,with_utls,with_wireguard,with_openvpn"
+
+// TLSFingerprints are the browser handshakes Config.TLSFingerprint accepts (sing-box's uTLS names).
+var TLSFingerprints = []string{"chrome", "firefox", "safari", "edge", "ios", "android", "random"}
+
+// ValidTLSFingerprint reports whether f is empty (each tunnel's own) or one of TLSFingerprints.
+func ValidTLSFingerprint(f string) bool { return f == "" || slices.Contains(TLSFingerprints, f) }
 
 // BootstrapSystem is DNS.Bootstrap for the system resolver.
 const BootstrapSystem = "system"
@@ -43,9 +50,15 @@ type Config struct {
 	// BlockQUIC refuses QUIC (UDP to port 443) that no list matched, so a browser retries over TCP, where a name
 	// can be read from the TLS handshake. A QUIC handshake the engine can't read hides the name, and a list
 	// that matches by name then lets it through.
-	BlockQUIC bool    `json:"block_quic,omitempty"`
-	DNS       DNS     `json:"dns,omitempty"`
-	Inbound   Inbound `json:"inbound,omitempty"`
+	BlockQUIC bool `json:"block_quic,omitempty"`
+	// BlockSTUN refuses STUN, the probe WebRTC uses to learn a public IP address: with split routing a browser's
+	// probe can go direct and show the real address while the page's traffic goes through a tunnel.
+	BlockSTUN bool `json:"block_stun,omitempty"`
+	// TLSFingerprint makes the TLS handshake of vless, vmess and trojan tunnels look like this browser's (one of
+	// TLSFingerprints). A tunnel whose options already choose a fingerprint keeps it. Empty: each tunnel's own.
+	TLSFingerprint string  `json:"tls_fingerprint,omitempty"`
+	DNS            DNS     `json:"dns,omitempty"`
+	Inbound        Inbound `json:"inbound,omitempty"`
 	// WorkDir is a directory the engine may write to (rule-set files, cache).
 	// It must be absolute and private to the app.
 	WorkDir string `json:"work_dir"`
@@ -192,6 +205,9 @@ func (c Config) Validate() error {
 		if _, err := netip.ParseAddr(c.DNS.Bootstrap); err != nil {
 			return fmt.Errorf("dns bootstrap %q must be an IP address or %q: %w", c.DNS.Bootstrap, BootstrapSystem, err)
 		}
+	}
+	if !ValidTLSFingerprint(c.TLSFingerprint) {
+		return fmt.Errorf("tls fingerprint %q is not one of %s", c.TLSFingerprint, strings.Join(TLSFingerprints, ", "))
 	}
 	if !logLevels[c.Log.Level] {
 		return fmt.Errorf("log level %q is not one of trace, debug, info, warn, error", c.Log.Level)

@@ -83,6 +83,7 @@ func Build(c Config) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tunnel %q: %w", t.ID, err)
 		}
+		applyFingerprint(t.Protocol, o, c.TLSFingerprint)
 		o["tag"] = tunnelTag(t.ID)
 		o["domain_resolver"] = "local" // the server's own name must not need a tunnel
 		if !p.endpoint && bootstrap != BootstrapSystem {
@@ -105,6 +106,9 @@ func Build(c Config) ([]byte, error) {
 
 	tun := c.Inbound.Mode != "proxy"
 	routeRules := []map[string]any{{"action": "sniff"}}
+	if c.BlockSTUN { // right after the sniff that names the protocol, before any list can send a STUN probe anywhere
+		routeRules = append(routeRules, map[string]any{"protocol": "stun", "action": "reject"})
+	}
 	if tun {
 		routeRules = append(routeRules,
 			map[string]any{"protocol": "dns", "action": "hijack-dns"},
@@ -213,4 +217,22 @@ func Build(c Config) ([]byte, error) {
 		cfg["endpoints"] = endpoints
 	}
 	return json.Marshal(cfg)
+}
+
+// fingerprintProtocols are the protocols whose TLS runs over TCP, where uTLS applies (QUIC protocols can't use it).
+var fingerprintProtocols = map[string]bool{"vless": true, "vmess": true, "trojan": true}
+
+// applyFingerprint turns uTLS on with fp for a tunnel that uses TLS and chose no fingerprint of its own.
+func applyFingerprint(protocol string, o map[string]any, fp string) {
+	if fp == "" || !fingerprintProtocols[protocol] {
+		return
+	}
+	tls, ok := o["tls"].(map[string]any)
+	if !ok || tls["enabled"] != true {
+		return
+	}
+	if _, own := tls["utls"]; own {
+		return
+	}
+	tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
 }

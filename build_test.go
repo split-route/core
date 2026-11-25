@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -458,5 +459,86 @@ func TestBuildBlockQUIC(t *testing.T) {
 	i := quic(cfg)
 	if i != len(order)-1 || i < 2 {
 		t.Errorf("the QUIC rule is at %d in %v: it must come after every list", i, order)
+	}
+}
+
+// BlockSTUN adds a reject rule for STUN right after the sniff, only when asked for.
+func TestBuildBlockSTUN(t *testing.T) {
+	c := baseConfig(t)
+	c.Lists = []List{{ID: "ads", Name: "Ads", Action: rules.Block}}
+	stun := func(cfg map[string]any) int {
+		for i, r := range cfg["route"].(map[string]any)["rules"].([]any) {
+			if m := r.(map[string]any); m["protocol"] == "stun" && m["action"] == "reject" {
+				return i
+			}
+		}
+		return -1
+	}
+	b, err := Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stun(parse(t, b)) != -1 {
+		t.Error("a STUN rule without BlockSTUN")
+	}
+	c.BlockSTUN = true
+	b, err = Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := stun(parse(t, b)); i != 1 {
+		t.Errorf("the STUN rule is at %d: it must follow the sniff rule directly", i)
+	}
+}
+
+// The fingerprint goes onto TLS tunnels of the TCP protocols that chose none, and nowhere else.
+func TestBuildTLSFingerprint(t *testing.T) {
+	tun := func(id, protocol, opts string) Tunnel {
+		return Tunnel{ID: id, Name: id, Protocol: protocol, Options: []byte(opts)}
+	}
+	c := baseConfig(t)
+	c.Inbound = Inbound{}
+	c.Tunnels = []Tunnel{
+		tun("plain", "vless", `{"type":"vless","server":"a.example.com","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811"}`),
+		tun("tls", "trojan", `{"type":"trojan","server":"a.example.com","server_port":443,"password":"x","tls":{"enabled":true}}`),
+		tun("own", "vmess", `{"type":"vmess","server":"a.example.com","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811","tls":{"enabled":true,"utls":{"enabled":true,"fingerprint":"firefox"}}}`),
+		tun("tlsoff", "vless", `{"type":"vless","server":"a.example.com","server_port":443,"uuid":"b831381d-6324-4d53-ad4f-8cda48b30811","tls":{"enabled":false}}`),
+		tun("quic", "hysteria2", `{"type":"hysteria2","server":"a.example.com","server_port":443,"password":"x","tls":{"enabled":true}}`),
+	}
+	c.Default = "tls"
+	utls := func(fp string) map[string]any {
+		c.TLSFingerprint = fp
+		b, err := Build(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]any{}
+		for _, o := range parse(t, b)["outbounds"].([]any) {
+			m := o.(map[string]any)
+			if tls, ok := m["tls"].(map[string]any); ok {
+				out[m["tag"].(string)] = tls["utls"]
+			}
+		}
+		return out
+	}
+	if got := utls(""); got[tunnelTag("tls")] != nil || got[tunnelTag("own")] == nil {
+		t.Errorf("with no fingerprint nothing is added and a tunnel's own stays: %v", got)
+	}
+	got := utls("safari")
+	want := map[string]any{"enabled": true, "fingerprint": "safari"}
+	if fmt.Sprint(got[tunnelTag("tls")]) != fmt.Sprint(want) {
+		t.Errorf("a TLS tunnel without one gets it: %v", got[tunnelTag("tls")])
+	}
+	if own := got[tunnelTag("own")].(map[string]any); own["fingerprint"] != "firefox" {
+		t.Errorf("a tunnel's own fingerprint wins: %v", own)
+	}
+	for _, id := range []string{"tlsoff", "quic"} {
+		if got[tunnelTag(id)] != nil {
+			t.Errorf("%s must not get one: %v", id, got[tunnelTag(id)])
+		}
+	}
+	c.TLSFingerprint = "netscape"
+	if _, err := Build(c); err == nil {
+		t.Error("an unknown fingerprint was accepted")
 	}
 }
